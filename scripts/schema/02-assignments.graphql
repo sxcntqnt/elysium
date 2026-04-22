@@ -1,0 +1,128 @@
+# ============================================================
+# SCHEMA 2: Assignment Types
+# ============================================================
+# DriverAssignment, ConductorAssignment, FleetOwnership,
+# StageAssignment, OrgMembership.
+#
+# GraphQL Union rules enforced by Dgraph:
+#   ✅ Members MUST be plain Object types — NOT Interface types.
+#   ✅ Members do NOT use "implements" — they are simply listed in the union.
+#   ✅ No fields are guaranteed across union members.
+#   ✅ Query using inline fragments only.
+#
+# The original draft incorrectly declared each type as
+# "implements Assignment". Unions have no fields to implement —
+# only interfaces do. That keyword is removed here.
+# Duplicate field blocks at the bottom of each type are also removed;
+# they existed only because the author believed interface rules applied.
+# ============================================================
+
+# ─────────────────────────────────────────────────────────────
+# ASSIGNMENT UNION
+# ─────────────────────────────────────────────────────────────
+# No guaranteed fields. Query example:
+#
+#   assignments {
+#     __typename
+#     ... on DriverAssignment   { vehicle { plate } shiftState }
+#     ... on ConductorAssignment { vehicle { plate } }
+#     ... on FleetOwnership      { vehicle { plate } }
+#     ... on StageAssignment     { stage { name } }
+#     ... on OrgMembership       { orgName role }
+#   }
+
+union Assignment = DriverAssignment | ConductorAssignment | FleetOwnership | StageAssignment | OrgMembership
+
+# ─────────────────────────────────────────────────────────────
+# DRIVER ASSIGNMENT
+# ─────────────────────────────────────────────────────────────
+# Maps to driver_assignments table.
+# Plain Object type — NOT "implements Assignment".
+
+type DriverAssignment {
+  id: ID!
+  actorId: String! @search(by: [hash])
+  organizationId: String! @search(by: [hash])
+  vehicle: Vehicle
+  shiftState: ShiftState
+  activeTripId: String
+  assignedAt: DateTime
+}
+
+# ─────────────────────────────────────────────────────────────
+# CONDUCTOR ASSIGNMENT
+# ─────────────────────────────────────────────────────────────
+# Maps to conductor_assignments table.
+# No shiftState column in DB — derived in lambda:
+#   conductor.vehicle ? "on_duty" : "off_duty"
+
+type ConductorAssignment {
+  id: ID!
+  actorId: String! @search(by: [hash])
+  organizationId: String! @search(by: [hash])
+  vehicle: Vehicle
+  activeTripId: String
+  assignedAt: DateTime
+}
+
+# ─────────────────────────────────────────────────────────────
+# FLEET OWNERSHIP
+# ─────────────────────────────────────────────────────────────
+# Maps to fleet_ownership table.
+# Represents a vehicle managed by an OPERATOR or ORG_CHAIR.
+
+type FleetOwnership {
+  id: ID!
+  actorId: String! @search(by: [hash])
+  organizationId: String! @search(by: [hash])
+  vehicle: Vehicle
+  assignedAt: DateTime
+}
+
+# ─────────────────────────────────────────────────────────────
+# STAGE ASSIGNMENT
+# ─────────────────────────────────────────────────────────────
+# Maps to stage_assignments table.
+#
+# ⚠️  actorId stores operator_id here, not actor_id.
+#     TS gatherAssignments() filters by operator_id:
+#       a.stageAssignments.filter(s => s.operator_id === actorId)
+#     Lambda resolver uses the same actorId field — value is operator_id.
+
+type StageAssignment {
+  id: ID!
+  actorId: String! @search(by: [hash])   # stores operator_id
+  organizationId: String! @search(by: [hash])
+  stage: Stage
+  assignedAt: DateTime
+}
+
+# ─────────────────────────────────────────────────────────────
+# ORG MEMBERSHIP
+# ─────────────────────────────────────────────────────────────
+# Maps to org_memberships table.
+# Member of the Assignment union so a single assignments field
+# can return all assignment varieties via inline fragments.
+
+type OrgMembership {
+  id: ID!
+  actor: Actor! @hasInverse(field: orgMemberships)
+  org: Org!
+  orgName: String! @search(by: [term])
+  role: String
+  joinedAt: DateTime
+}
+
+# ─────────────────────────────────────────────────────────────
+# USER ASSIGNMENTS (embedded)
+# ─────────────────────────────────────────────────────────────
+# Bundles all assignment types for a user.
+# Used in UserState — embedded, not root-queryable directly.
+
+type UserAssignments {
+  driverAssignments:    [DriverAssignment!]!
+  conductorAssignments: [ConductorAssignment!]!
+  orgMemberships:       [OrgMembership!]!
+  fleetOwnership:       [FleetOwnership!]!
+  stageAssignments:     [StageAssignment!]!
+}

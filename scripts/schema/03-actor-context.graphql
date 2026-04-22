@@ -1,0 +1,179 @@
+# ============================================================
+# SCHEMA 3: Actor & Context Types
+# ============================================================
+# Actor, ActorContext, ActiveContext, UserState, UserProfile,
+# MpesaGoProfile, User.
+#
+# These types form the core of the context activation system.
+# The goal: a single getActiveContext query returns a shape that
+# can be directly assigned to role.context / App.ActiveContext
+# with no extra TS mapping logic.
+# ============================================================
+
+# ─────────────────────────────────────────────────────────────
+# USER (auth reference)
+# ─────────────────────────────────────────────────────────────
+# Minimal user node — references the auth system.
+# Mirrors the auth.users table; extend with additional fields as needed.
+
+type User {
+  id: ID!
+  email: String! @search(by: [hash])
+  emailVerified: Boolean!
+  createdAt: DateTime
+}
+
+# ─────────────────────────────────────────────────────────────
+# PROFILE
+# ─────────────────────────────────────────────────────────────
+# User profile data used in context activation.
+# Only fields referenced in activateXContext() logic are included.
+
+type Profile {
+  id: ID!
+  user: User!
+  displayName: String
+  dateOfBirth: DateTime                    # Used for minor detection
+  onboardingStatus: String @search(by: [hash])
+  guardianProfileId: String @search(by: [hash])
+}
+
+# ─────────────────────────────────────────────────────────────
+# MPESA GO PROFILE
+# ─────────────────────────────────────────────────────────────
+# M-PESA GO account details for minor passengers.
+# null for adult users.
+
+type MpesaGoProfile {
+  id: ID!
+  profile: Profile!
+  guardianProfileId: String @search(by: [hash])
+  complianceStatus: MpesaGoComplianceStatus!
+  documentsSubmitted: Boolean!
+  documentsOverdue: Boolean!
+  lipaNaMpesaEnabled: Boolean!
+  sendMoneyEnabled: Boolean!
+  dailyLimit: Int
+  perTransactionLimit: Int
+  isActive: Boolean!
+  registeredAt: DateTime
+}
+
+# ─────────────────────────────────────────────────────────────
+# ACTOR
+# ─────────────────────────────────────────────────────────────
+# Maps to the actors table.
+# Represents one role/identity a user can operate as.
+# A user may have multiple actors (e.g. DRIVER + PASSENGER).
+
+type Actor {
+  id: ID!
+
+  # DRIVER | OPERATOR | ORG_CHAIR | … (all 24 values)
+  type: ActorType! @search(by: [hash])
+
+  # active | inactive
+  status: ActorStatus! @search(by: [hash])
+
+  # The user who owns this actor
+  user: User!
+
+  # All jurisdictions this actor holds
+  jurisdictions: [Jurisdiction!]!
+
+  # Org memberships for this actor
+  orgMemberships: [OrgMembership!]!
+
+  # Direct + policy group effective permissions
+  permissions: [EffectivePermission!]!
+
+  # Permissions delegated TO this actor from others (inbound)
+  delegatedPermissions: [EffectivePermission!]!
+
+  # Outbound delegations FROM this actor (for hasDelegatedApproval on OrgChair)
+  delegatedTo: [DelegatedAuthority!]!
+
+  # Policy group IDs this actor belongs to
+  policyGroupIds: [String!]!
+
+  createdAt: DateTime
+  updatedAt: DateTime
+}
+
+# ─────────────────────────────────────────────────────────────
+# ACTIVE CONTEXT
+# ─────────────────────────────────────────────────────────────
+# The final, flattened context returned to the microservice.
+# Mirrors App.ActiveContext exactly — clients assign this directly
+# to role.context without any extra mapping.
+#
+# All business logic (selectActorContext, gatherAssignments,
+# permission flattening) happens in the getActiveContext lambda resolver.
+
+type ActiveContext {
+  id: ID!
+
+  # The actor record ID (actors table / Dgraph Actor node)
+  actorId: String!
+
+  # The actor type for this context session
+  actorType: ActorType!
+
+  # Flattened allow-only action strings.
+  # deny resolution already happened in effective_permissions_raw.
+  # Mirrors activateXContext() permission flattening in context.template.ts.
+  permissions: [String!]!
+
+  # Flattened delegated allow-only action strings
+  delegatedPermissions: [String!]!
+
+  # Policy group IDs (policyGroupIds on the Actor node)
+  policyGroups: [String!]!
+
+  # All assignments for this actor — union type.
+  # Query with inline fragments:
+  #   ... on DriverAssignment   { vehicle { plate } shiftState }
+  #   ... on ConductorAssignment { vehicle { plate } }
+  #   ... on FleetOwnership      { vehicle { plate } }
+  #   ... on StageAssignment     { stage { name } }
+  #   ... on OrgMembership       { orgName role }
+  assignments: [Assignment!]!
+
+  # Whether the user has a paid subscription plan
+  hasPaidPlan: Boolean!
+
+  # Back-reference to the owning UserState
+  userState: UserState! @hasInverse(field: activeContexts)
+}
+
+# ─────────────────────────────────────────────────────────────
+# USER STATE
+# ─────────────────────────────────────────────────────────────
+# Complete user state resolved at login.
+# Mirrors the UserState type in userState.server.ts.
+# Contains all actors, profile data, active contexts, and assignments.
+
+type UserState {
+  id: ID!
+
+  # The user UUID (matches auth.users.id)
+  userId: String! @id @search(by: [hash])
+
+  # Whether this user has an active paid subscription
+  hasPaidPlan: Boolean!
+
+  # User profile (display name, DOB for minor detection)
+  profile: Profile
+
+  # M-PESA GO data — null for non-minor users
+  mpesaGo: MpesaGoProfile
+
+  # All actor nodes for this user
+  actors: [Actor!]!
+
+  # All active contexts — one per activated actor type
+  activeContexts: [ActiveContext!]!
+
+  # All assignments bundled by type
+  assignments: UserAssignments!
+}

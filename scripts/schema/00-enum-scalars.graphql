@@ -1,0 +1,100 @@
+# ============================================================
+# SCHEMA 0: Enums & Scalars
+# ============================================================
+# All reusable enum definitions.
+# Import this first in all other schema files.
+# Mirrors ACTOR_TYPES and related constants in context.template.ts exactly.
+# ============================================================
+
+# ─────────────────────────────────────────────────────────────
+# ACTOR TYPE
+# ─────────────────────────────────────────────────────────────
+# All 24 actor type values from ACTOR_TYPES in context.template.ts.
+# Must match the values in the roles table (roles.id) exactly —
+# no mapping layer is acceptable between this enum and the DB.
+
+enum ActorType {
+  SUPER_ADMIN
+  ADMIN
+  ORG_CHAIR
+  GENERAL_MANAGER
+  FLEET_MANAGER
+  OPERATIONS_MANAGER
+  BRANCH_MANAGER
+  SECRETARY
+  ACCOUNTANT
+  ACCOUNTS_CLERK
+  AUDITOR
+  COMPLIANCE_OFFICER
+  ROUTE_SUPERVISOR
+  DISPATCHER
+  MECHANIC
+  FIELD_ATTENDANT
+  DATA_CLERK
+  CUSTOMER_SUPPORT
+  SALES_MANAGER
+  OPERATOR
+  DRIVER
+  CONDUCTOR
+  PASSENGER
+  GUEST
+}
+
+# ─────────────────────────────────────────────────────────────
+# PERMISSION EFFECT
+# ─────────────────────────────────────────────────────────────
+# deny takes precedence over allow — resolution happens in the
+# effective_permissions_raw view before data reaches Dgraph.
+# Only allow rows should ever be written to Dgraph after migration
+# pre-processing collapses conflicts.
+
+enum PermissionEffect {
+  allow
+  deny
+}
+
+# ─────────────────────────────────────────────────────────────
+# JURISDICTION LEVEL
+# ─────────────────────────────────────────────────────────────
+# Hierarchy: federal > org > branch > department.
+# federal = platform-wide (no scope_id needed).
+
+enum JurisdictionLevel {
+  federal
+  org
+  branch
+  department
+}
+
+# ─────────────────────────────────────────────────────────────
+# SHIFT STATE
+# ─────────────────────────────────────────────────────────────
+# Driver shift states. Conductors have no DB column for this —
+# their state is derived in the lambda resolver from vehicle presence.
+
+enum ShiftState {
+  on_duty
+  off_duty
+  on_break
+}
+
+# ─────────────────────────────────────────────────────────────
+# ACTOR STATUS
+# ─────────────────────────────────────────────────────────────
+
+enum ActorStatus {
+  active
+  inactive
+}
+
+# ─────────────────────────────────────────────────────────────
+# MPESA GO COMPLIANCE STATUS
+# ─────────────────────────────────────────────────────────────
+# Compliance status for minor passengers using M-PESA GO.
+
+enum MpesaGoComplianceStatus {
+  active
+  documents_pending
+  documents_overdue
+  frozen
+}

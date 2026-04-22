@@ -1,0 +1,410 @@
+# ============================================================
+# SCHEMA 4: Queries & Lambda Resolvers
+# ============================================================
+# Root Query type and the JavaScript lambda resolver implementations
+# that replace the TypeScript context activation system:
+#
+#   activateXContext()    → getActiveContext
+#   selectActorContext()  → (internal to getActiveContext lambda)
+#   gatherAssignments()   → getAssignments
+#   resolveUserState()    → getUserState
+#
+# Deploy lambda JavaScript via the Dgraph Lambda API after
+# applying the schema. The @lambda directive only declares
+# the field — the resolver must be deployed separately.
+# ============================================================
+
+type Query {
+  # ── getActiveContext ──────────────────────────────────────────────────────
+  # Replaces activateXContext(userState, contextType, options).
+  #
+  # Implements selectActorContext() logic internally:
+  #   - superAdmin: SUPER_ADMIN or ADMIN actor
+  #   - orgChair:   ORG_CHAIR actor, optionally scoped to orgId
+  #   - orgStaff:   any ORG_STAFF_TYPES actor, optionally scoped to orgId
+  #   - crew:       DRIVER preferred over CONDUCTOR
+  #   - operator:   OPERATOR actor
+  #   - passenger:  PASSENGER preferred over GUEST
+  #   - guest:      GUEST actor
+  #
+  # Returns null when no matching active actor exists.
+  # On null: microservice falls back to passenger context.
+  #
+  # @param userId      - The user UUID (auth.users.id)
+  # @param contextType - The ActorType to activate
+  # @param orgId       - Optional org UUID for org-scoped contexts
+  getActiveContext(
+    userId: String!
+    contextType: ActorType!
+    orgId: String
+  ): ActiveContext @lambda
+
+  # ── getUserState ──────────────────────────────────────────────────────────
+  # Full user state resolved at login.
+  # Replaces resolveUserState() in userState.server.ts.
+  # Returns null when the userId does not exist.
+  getUserState(userId: String!): UserState @lambda
+
+  # ── getAssignments ────────────────────────────────────────────────────────
+  # All Assignment union members for a specific actor.
+  # Replaces gatherAssignments() — handles the StageAssignment
+  # operator_id special case internally.
+  getAssignments(actorId: String!): [Assignment!]! @lambda
+}
+
+# ============================================================
+# LAMBDA IMPLEMENTATIONS
+# ============================================================
+# Deploy with: self.addGraphQLResolvers({ "Query.X": handlerFn })
+# The implementations below are JavaScript — paste into your
+# Dgraph Lambda deployment bundle.
+# ============================================================
+
+# ------------------------------------------------------------
+# ORG_STAFF_TYPES helper (shared across resolvers)
+# ------------------------------------------------------------
+# Mirrors ORG_STAFF_TYPES array in context.template.ts.
+# Cannot be stored as an enum value — derived at query time.
+#
+# ```javascript
+# const ORG_STAFF_TYPES = new Set([
+#   "GENERAL_MANAGER", "FLEET_MANAGER", "OPERATIONS_MANAGER",
+#   "BRANCH_MANAGER", "SECRETARY", "ACCOUNTANT", "ACCOUNTS_CLERK",
+#   "AUDITOR", "COMPLIANCE_OFFICER", "ROUTE_SUPERVISOR", "DISPATCHER",
+#   "MECHANIC", "FIELD_ATTENDANT", "DATA_CLERK", "CUSTOMER_SUPPORT",
+#   "SALES_MANAGER",
+# ]);
+# const isOrgStaff = (type) => ORG_STAFF_TYPES.has(type);
+# ```
+
+# ------------------------------------------------------------
+# Permission flattening helper (shared across resolvers)
+# ------------------------------------------------------------
+# Mirrors the filter + map in activateXContext():
+#   permissions = actorCtx.permissions
+#     .filter(p => p.effect === "allow")
+#     .map(p => p.action)
+#
+# ```javascript
+# function flattenPermissions(perms) {
+#   return perms
+#     .filter(p => p.effect === "allow")
+#     .map(p => p.action);
+# }
+# ```
+
+# ------------------------------------------------------------
+# LAMBDA: getActiveContext
+# ------------------------------------------------------------
+# ```javascript
+# async function getActiveContext({ args, dql }) {
+#   const { userId, contextType, orgId } = args;
+#
+#   // 1. Fetch all actor contexts for this user in one query.
+#   const res = await dql.query(`
+#     query fetchActors($userId: string) {
+#       user(func: eq(UserState.userId, $userId)) {
+#         UserState.actors {
+#           uid
+#           Actor.type
+#           Actor.status
+#           Actor.policyGroupIds
+#           Actor.jurisdictions {
+#             Jurisdiction.level
+#             Jurisdiction.scopeId
+#             Jurisdiction.maxVehicles
+#           }
+#           Actor.permissions {
+#             EffectivePermission.action
+#             EffectivePermission.effect
+#             EffectivePermission.scopeId
+#             EffectivePermission.level
+#             EffectivePermission.source
+#           }
+#           Actor.delegatedPermissions {
+#             EffectivePermission.action
+#             EffectivePermission.effect
+#             EffectivePermission.scopeId
+#             EffectivePermission.level
+#             EffectivePermission.source
+#           }
+#         }
+#         UserState.hasPaidPlan
+#       }
+#     }
+#   `, { $userId: userId });
+#
+#   const userState = res.data.user[0];
+#   if (!userState) return null;
+#
+#   const actors = userState["UserState.actors"] ?? [];
+#   const hasPaidPlan = userState["UserState.hasPaidPlan"] ?? false;
+#   const active = actors.filter(a => a["Actor.status"] === "active");
+#
+#   // 2. selectActorContext logic — mirrors context.template.ts exactly.
+#   let selected = null;
+#
+#   switch (contextType) {
+#     case "SUPER_ADMIN":
+#     case "ADMIN":
+#       selected = active.find(a =>
+#         a["Actor.type"] === "SUPER_ADMIN" || a["Actor.type"] === "ADMIN"
+#       ) ?? null;
+#       break;
+#
+#     case "ORG_CHAIR":
+#       selected = active.find(a => {
+#         if (a["Actor.type"] !== "ORG_CHAIR") return false;
+#         if (!orgId) return true;
+#         return (a["Actor.jurisdictions"] ?? []).some(j =>
+#           j["Jurisdiction.level"] === "federal" ||
+#           (j["Jurisdiction.level"] === "org" && j["Jurisdiction.scopeId"] === orgId)
+#         );
+#       }) ?? null;
+#       break;
+#
+#     case "GENERAL_MANAGER":
+#     case "FLEET_MANAGER":
+#     case "OPERATIONS_MANAGER":
+#     case "BRANCH_MANAGER":
+#     case "SECRETARY":
+#     case "ACCOUNTANT":
+#     case "ACCOUNTS_CLERK":
+#     case "AUDITOR":
+#     case "COMPLIANCE_OFFICER":
+#     case "ROUTE_SUPERVISOR":
+#     case "DISPATCHER":
+#     case "MECHANIC":
+#     case "FIELD_ATTENDANT":
+#     case "DATA_CLERK":
+#     case "CUSTOMER_SUPPORT":
+#     case "SALES_MANAGER":
+#       selected = active.find(a => {
+#         if (!isOrgStaff(a["Actor.type"])) return false;
+#         if (!orgId) return true;
+#         return (a["Actor.jurisdictions"] ?? []).some(j =>
+#           j["Jurisdiction.level"] === "federal" ||
+#           (j["Jurisdiction.level"] === "org" && j["Jurisdiction.scopeId"] === orgId) ||
+#           j["Jurisdiction.level"] === "branch"
+#         );
+#       }) ?? null;
+#       break;
+#
+#     case "DRIVER":
+#       selected = active.find(a => a["Actor.type"] === "DRIVER") ?? null;
+#       break;
+#
+#     case "CONDUCTOR":
+#       // CREW mode: DRIVER preferred over CONDUCTOR
+#       selected = active.find(a => a["Actor.type"] === "DRIVER")
+#               ?? active.find(a => a["Actor.type"] === "CONDUCTOR")
+#               ?? null;
+#       break;
+#
+#     case "OPERATOR":
+#       selected = active.find(a => a["Actor.type"] === "OPERATOR") ?? null;
+#       break;
+#
+#     case "PASSENGER":
+#       selected = active.find(a => a["Actor.type"] === "PASSENGER")
+#               ?? active.find(a => a["Actor.type"] === "GUEST")
+#               ?? null;
+#       break;
+#
+#     case "GUEST":
+#       selected = active.find(a => a["Actor.type"] === "GUEST") ?? null;
+#       break;
+#
+#     default:
+#       return null;
+#   }
+#
+#   if (!selected) return null;
+#
+#   // 3. Gather actorId from Dgraph UID.
+#   const actorId = selected.uid;
+#
+#   // 4. Flatten permissions — allow only, mirrors context.template.ts.
+#   const permissions = flattenPermissions(selected["Actor.permissions"] ?? []);
+#   const delegatedPermissions = flattenPermissions(selected["Actor.delegatedPermissions"] ?? []);
+#   const policyGroups = selected["Actor.policyGroupIds"] ?? [];
+#
+#   // 5. Fetch assignments for this actor.
+#   const assignments = await getAssignments({ args: { actorId }, dql });
+#
+#   return {
+#     actorId,
+#     actorType: selected["Actor.type"],
+#     permissions,
+#     delegatedPermissions,
+#     policyGroups,
+#     assignments,
+#     hasPaidPlan,
+#   };
+# }
+# ```
+
+# ------------------------------------------------------------
+# LAMBDA: getAssignments
+# ------------------------------------------------------------
+# Replaces gatherAssignments() in context.template.ts.
+# Handles the StageAssignment operator_id special case:
+#   TS: a.stageAssignments.filter(s => s.operator_id === actorId)
+#   Here: actorId field stores operator_id for StageAssignment nodes.
+#
+# ```javascript
+# async function getAssignments({ args, dql }) {
+#   const { actorId } = args;
+#
+#   // All five assignment types fetched in parallel.
+#   const [drivers, conductors, fleets, stages, orgs] = await Promise.all([
+#     dql.query(`query {
+#       queryDriverAssignment(filter: { actorId: { eq: "${actorId}" } }) {
+#         id actorId organizationId assignedAt shiftState activeTripId
+#         vehicle { id plate }
+#       }
+#     }`),
+#     dql.query(`query {
+#       queryConductorAssignment(filter: { actorId: { eq: "${actorId}" } }) {
+#         id actorId organizationId assignedAt activeTripId
+#         vehicle { id plate }
+#       }
+#     }`),
+#     dql.query(`query {
+#       queryFleetOwnership(filter: { actorId: { eq: "${actorId}" } }) {
+#         id actorId organizationId assignedAt
+#         vehicle { id plate }
+#       }
+#     }`),
+#     // ⚠️  actorId field stores operator_id for StageAssignment.
+#     //     Filter is identical — the stored value IS operator_id.
+#     dql.query(`query {
+#       queryStageAssignment(filter: { actorId: { eq: "${actorId}" } }) {
+#         id actorId organizationId assignedAt
+#         stage { id name }
+#       }
+#     }`),
+#     dql.query(`query {
+#       queryOrgMembership(filter: { actor: { id: "${actorId}" } }) {
+#         id orgName role joinedAt
+#         org { id name }
+#       }
+#     }`),
+#   ]);
+#
+#   // Add __typename so Dgraph can resolve the union correctly.
+#   return [
+#     ...(drivers.data.queryDriverAssignment ?? []).map(d =>
+#       ({ ...d, __typename: "DriverAssignment",
+#          // Derive conductorShiftState equivalent for display consistency
+#       })
+#     ),
+#     ...(conductors.data.queryConductorAssignment ?? []).map(c => ({
+#       ...c,
+#       __typename: "ConductorAssignment",
+#       // ⚠️  shiftState derived: on_duty if vehicle present, off_duty otherwise.
+#       shiftState: c.vehicle ? "on_duty" : "off_duty",
+#     })),
+#     ...(fleets.data.queryFleetOwnership ?? []).map(f =>
+#       ({ ...f, __typename: "FleetOwnership" })
+#     ),
+#     ...(stages.data.queryStageAssignment ?? []).map(s =>
+#       ({ ...s, __typename: "StageAssignment" })
+#     ),
+#     ...(orgs.data.queryOrgMembership ?? []).map(o =>
+#       ({ ...o, __typename: "OrgMembership" })
+#     ),
+#   ];
+# }
+# ```
+
+# ------------------------------------------------------------
+# LAMBDA: getUserState
+# ------------------------------------------------------------
+# Replaces resolveUserState() in userState.server.ts.
+# Fetches user, profile, mpesaGo, all actors, and all assignments
+# in parallel to minimise latency.
+#
+# ```javascript
+# async function getUserState({ args, dql }) {
+#   const { userId } = args;
+#
+#   // All root-level data fetched in parallel.
+#   const [stateRes, allActors] = await Promise.all([
+#     dql.query(`query {
+#       queryUserState(filter: { userId: { eq: "${userId}" } }) {
+#         userId hasPaidPlan
+#         profile { id displayName dateOfBirth onboardingStatus guardianProfileId }
+#         mpesaGo {
+#           id complianceStatus documentsSubmitted documentsOverdue
+#           lipaNaMpesaEnabled sendMoneyEnabled dailyLimit perTransactionLimit
+#           isActive registeredAt
+#         }
+#         actors {
+#           uid
+#           Actor.type Actor.status Actor.policyGroupIds
+#           Actor.jurisdictions { Jurisdiction.level Jurisdiction.scopeId Jurisdiction.maxVehicles }
+#           Actor.permissions { EffectivePermission.action EffectivePermission.effect EffectivePermission.scopeId EffectivePermission.level EffectivePermission.source }
+#           Actor.delegatedPermissions { EffectivePermission.action EffectivePermission.effect EffectivePermission.scopeId EffectivePermission.level EffectivePermission.source }
+#         }
+#       }
+#     }`),
+#   ]);
+#
+#   const state = stateRes.data.queryUserState[0];
+#   if (!state) return null;
+#
+#   // Build active contexts for each actor.
+#   const activeContexts = await Promise.all(
+#     (state.actors ?? []).map(async actor => {
+#       const assignments = await getAssignments({ args: { actorId: actor.uid }, dql });
+#       return {
+#         actorId: actor.uid,
+#         actorType: actor["Actor.type"],
+#         permissions: flattenPermissions(actor["Actor.permissions"] ?? []),
+#         delegatedPermissions: flattenPermissions(actor["Actor.delegatedPermissions"] ?? []),
+#         policyGroups: actor["Actor.policyGroupIds"] ?? [],
+#         assignments,
+#         hasPaidPlan: state.hasPaidPlan,
+#       };
+#     })
+#   );
+#
+#   // Bundle all assignment types for the flat UserAssignments field.
+#   const actorIds = (state.actors ?? []).map(a => a.uid);
+#   const allAssignments = (await Promise.all(
+#     actorIds.map(id => getAssignments({ args: { actorId: id }, dql }))
+#   )).flat();
+#
+#   const byType = (typename) => allAssignments.filter(a => a.__typename === typename);
+#
+#   return {
+#     userId,
+#     hasPaidPlan: state.hasPaidPlan,
+#     profile: state.profile ?? null,
+#     mpesaGo: state.mpesaGo ?? null,
+#     actors: state.actors ?? [],
+#     activeContexts,
+#     assignments: {
+#       driverAssignments:    byType("DriverAssignment"),
+#       conductorAssignments: byType("ConductorAssignment"),
+#       orgMemberships:       byType("OrgMembership"),
+#       fleetOwnership:       byType("FleetOwnership"),
+#       stageAssignments:     byType("StageAssignment"),
+#     },
+#   };
+# }
+# ```
+
+# ------------------------------------------------------------
+# Lambda registration boilerplate
+# ------------------------------------------------------------
+# Add to your lambda server entry point:
+#
+# ```javascript
+# self.addGraphQLResolvers({
+#   "Query.getActiveContext": getActiveContext,
+#   "Query.getUserState":     getUserState,
+#   "Query.getAssignments":   getAssignments,
+# });
+# ```

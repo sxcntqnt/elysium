@@ -1,0 +1,139 @@
+# ============================================================
+# SCHEMA 1: Core Types
+# ============================================================
+# Jurisdiction, OrgMembership (non-assignment view), EffectivePermission,
+# Vehicle, Stage, Org — shared reference types used across all schemas.
+# ============================================================
+
+# ─────────────────────────────────────────────────────────────
+# JURISDICTION
+# ─────────────────────────────────────────────────────────────
+# Maps to actor_jurisdictions table.
+# Represents the geographic / org scope an actor can operate within.
+#
+# ⚠️  created_at is kept for audit trail but not used in any
+#     context activation logic. Remove if storage is a concern.
+
+type Jurisdiction {
+  id: ID!
+
+  # The actor who holds this jurisdiction
+  actor: Actor! @hasInverse(field: jurisdictions)
+
+  # federal | org | branch | department
+  level: JurisdictionLevel!
+
+  # null for federal; org/branch/dept UUID otherwise
+  scopeId: String @search(by: [hash])
+
+  # OPERATOR only — max vehicles in this org scope.
+  # -1 or null means no limit was set.
+  maxVehicles: Int
+
+  createdAt: DateTime @search
+}
+
+# ─────────────────────────────────────────────────────────────
+# EFFECTIVE PERMISSION
+# ─────────────────────────────────────────────────────────────
+# Denormalised from effective_permissions_raw view.
+# Each node represents one resolved, post-deny-collapse permission grant.
+#
+# Source string patterns (use startsWith — never exact match on group/delegated):
+#   "direct"                    — from actor_permissions
+#   "group:<policy_group.name>" — from policy_group_permissions
+#   "delegated_from:<actorId>"  — from delegated_authority
+#
+# ⚠️  Migration note: pre-process to collapse deny > allow before writing.
+#     If any row for (actor_id, action, scope_id) is deny, only write the
+#     deny row. Write allow rows only where no deny exists.
+
+type EffectivePermission {
+  id: ID!
+
+  # The actor this permission applies to
+  actorId: String! @search
+
+  # Action string, e.g. "booking.add", "vehicle.edit"
+  action: String! @search(by: [hash, term])
+
+  # allow | deny (deny already resolved in migration pre-processing)
+  effect: PermissionEffect!
+
+  # Optional scope — orgId or branchId this permission is scoped to
+  scopeId: String @search(by: [hash])
+
+  # Jurisdiction level of this grant
+  level: JurisdictionLevel
+
+  # Source string — parse with startsWith in lambda resolvers
+  source: String! @search(by: [hash])
+}
+
+# ─────────────────────────────────────────────────────────────
+# PERMISSION ENTRY (lambda helper — not stored)
+# ─────────────────────────────────────────────────────────────
+# Raw permission entry before actor_id is attached.
+# Used internally by lambda resolvers; not exposed in root queries.
+
+type PermissionEntry {
+  action: String!
+  effect: PermissionEffect!
+  scopeId: String
+  level: JurisdictionLevel
+}
+
+# ─────────────────────────────────────────────────────────────
+# DELEGATED AUTHORITY
+# ─────────────────────────────────────────────────────────────
+# Tracks outbound delegations FROM an actor (for hasDelegatedApproval).
+# resolveUserState only fetched inbound grants — this type adds the
+# outbound edge so OrgChairContext.hasDelegatedApproval can be resolved
+# without a separate query.
+
+type DelegatedAuthority {
+  id: ID!
+
+  # The actor granting the delegation
+  fromActor: Actor! @hasInverse(field: delegatedTo)
+
+  # The actor receiving the delegation
+  toActor: Actor!
+
+  permissionId: String!
+
+  revoked: Boolean!
+
+  expiresAt: DateTime
+}
+
+# ─────────────────────────────────────────────────────────────
+# VEHICLE (reference type)
+# ─────────────────────────────────────────────────────────────
+# Minimal vehicle type — only fields needed for assignment context.
+# Extend with full vehicle schema in a separate domain schema file.
+
+type Vehicle {
+  id: ID!
+  plate: String! @search(by: [hash, term])
+}
+
+# ─────────────────────────────────────────────────────────────
+# STAGE (reference type)
+# ─────────────────────────────────────────────────────────────
+# A route / stage an operator is approved to dispatch.
+
+type Stage {
+  id: ID!
+  name: String! @search(by: [term])
+}
+
+# ─────────────────────────────────────────────────────────────
+# ORG (reference type)
+# ─────────────────────────────────────────────────────────────
+# Minimal org type — only fields needed for membership context.
+
+type Org {
+  id: ID!
+  name: String! @search(by: [term])
+}

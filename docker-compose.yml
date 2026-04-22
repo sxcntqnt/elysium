@@ -1,0 +1,40 @@
+# Local development stack — Dgraph only.
+# The auth-service itself is run with `make run` outside Docker for fast iteration.
+version: "3.9"
+
+services:
+  dgraph-zero:
+    image: dgraph/dgraph:v23.1.1
+    container_name: auth_dgraph_zero
+    ports:
+      - "5080:5080"
+      - "6080:6080"
+    command: dgraph zero --my=dgraph-zero:5080
+    volumes:
+      - dgraph_zero_data:/dgraph
+
+  dgraph-alpha:
+    image: dgraph/dgraph:v23.1.1
+    container_name: auth_dgraph_alpha
+    ports:
+      - "8080:8080"   # HTTP (GraphQL + admin)
+      - "9080:9080"   # gRPC (used by dgo client)
+    command: >
+      dgraph alpha
+        --my=dgraph-alpha:7080
+        --zero=dgraph-zero:5080
+        --security whitelist=0.0.0.0/0
+    depends_on:
+      - dgraph-zero
+    volumes:
+      - dgraph_alpha_data:/dgraph
+
+  dgraph-ratel:
+    image: dgraph/ratel:v21.12.0
+    container_name: auth_dgraph_ratel
+    ports:
+      - "8000:8000"   # Web UI — open http://localhost:8000 in the browser
+
+volumes:
+  dgraph_zero_data:
+  dgraph_alpha_data:

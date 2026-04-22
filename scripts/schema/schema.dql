@@ -1,0 +1,272 @@
+# ============================================================
+# MASTER SCHEMA — sxcntqnt-dgraph
+# ============================================================
+# Combined schema for deployment via a single Dgraph live load
+# or via the GraphQL /admin/schema endpoint.
+#
+# Apply order matters for type references:
+#   00 → 01 → 02 → 03 → 04
+#
+# Individual file deployment:
+#   curl -X POST localhost:8080/admin/schema \
+#        --data-binary @scripts/schema/schema.graphql \
+#        -H "Content-Type: application/graphql"
+# ============================================================
+
+# ── 00: Enums ─────────────────────────────────────────────────────────────────
+
+enum ActorType {
+  SUPER_ADMIN
+  ADMIN
+  ORG_CHAIR
+  GENERAL_MANAGER
+  FLEET_MANAGER
+  OPERATIONS_MANAGER
+  BRANCH_MANAGER
+  SECRETARY
+  ACCOUNTANT
+  ACCOUNTS_CLERK
+  AUDITOR
+  COMPLIANCE_OFFICER
+  ROUTE_SUPERVISOR
+  DISPATCHER
+  MECHANIC
+  FIELD_ATTENDANT
+  DATA_CLERK
+  CUSTOMER_SUPPORT
+  SALES_MANAGER
+  OPERATOR
+  DRIVER
+  CONDUCTOR
+  PASSENGER
+  GUEST
+}
+
+enum PermissionEffect {
+  allow
+  deny
+}
+
+enum JurisdictionLevel {
+  federal
+  org
+  branch
+  department
+}
+
+enum ShiftState {
+  on_duty
+  off_duty
+  on_break
+}
+
+enum ActorStatus {
+  active
+  inactive
+}
+
+enum MpesaGoComplianceStatus {
+  active
+  documents_pending
+  documents_overdue
+  frozen
+}
+
+# ── 01: Core shared types ─────────────────────────────────────────────────────
+
+type Jurisdiction {
+  id: ID!
+  actor: Actor! @hasInverse(field: jurisdictions)
+  level: JurisdictionLevel!
+  scopeId: String @search(by: [hash])
+  maxVehicles: Int
+  createdAt: DateTime @search
+}
+
+type EffectivePermission {
+  id: ID!
+  actorId: String! @search
+  action: String! @search(by: [hash, term])
+  effect: PermissionEffect!
+  scopeId: String @search(by: [hash])
+  level: JurisdictionLevel
+  source: String! @search(by: [hash])
+}
+
+type PermissionEntry {
+  action: String!
+  effect: PermissionEffect!
+  scopeId: String
+  level: JurisdictionLevel
+}
+
+type DelegatedAuthority {
+  id: ID!
+  fromActor: Actor! @hasInverse(field: delegatedTo)
+  toActor: Actor!
+  permissionId: String!
+  revoked: Boolean!
+  expiresAt: DateTime
+}
+
+type Vehicle {
+  id: ID!
+  plate: String! @search(by: [hash, term])
+}
+
+type Stage {
+  id: ID!
+  name: String! @search(by: [term])
+}
+
+type Org {
+  id: ID!
+  name: String! @search(by: [term])
+}
+
+# ── 02: Assignment union & members ────────────────────────────────────────────
+#
+# IMPORTANT: union members are plain Object types.
+# They do NOT implement the union — they are simply listed in its declaration.
+# Querying requires inline fragments; no fields are guaranteed across members.
+
+union Assignment = DriverAssignment | ConductorAssignment | FleetOwnership | StageAssignment | OrgMembership
+
+type DriverAssignment {
+  id: ID!
+  actorId: String! @search(by: [hash])
+  organizationId: String! @search(by: [hash])
+  vehicle: Vehicle
+  shiftState: ShiftState
+  activeTripId: String
+  assignedAt: DateTime
+}
+
+type ConductorAssignment {
+  id: ID!
+  actorId: String! @search(by: [hash])
+  organizationId: String! @search(by: [hash])
+  vehicle: Vehicle
+  activeTripId: String
+  assignedAt: DateTime
+}
+
+type FleetOwnership {
+  id: ID!
+  actorId: String! @search(by: [hash])
+  organizationId: String! @search(by: [hash])
+  vehicle: Vehicle
+  assignedAt: DateTime
+}
+
+# ⚠️  actorId stores operator_id here, not actor_id.
+#     Lambda resolver filters by actorId (= operator_id) — matches TS behaviour.
+type StageAssignment {
+  id: ID!
+  actorId: String! @search(by: [hash])
+  organizationId: String! @search(by: [hash])
+  stage: Stage
+  assignedAt: DateTime
+}
+
+type OrgMembership {
+  id: ID!
+  actor: Actor! @hasInverse(field: orgMemberships)
+  org: Org!
+  orgName: String! @search(by: [term])
+  role: String
+  joinedAt: DateTime
+}
+
+type UserAssignments {
+  driverAssignments:    [DriverAssignment!]!
+  conductorAssignments: [ConductorAssignment!]!
+  orgMemberships:       [OrgMembership!]!
+  fleetOwnership:       [FleetOwnership!]!
+  stageAssignments:     [StageAssignment!]!
+}
+
+# ── 03: Actor & context types ─────────────────────────────────────────────────
+
+type User {
+  id: ID!
+  email: String! @search(by: [hash])
+  emailVerified: Boolean!
+  createdAt: DateTime
+}
+
+type Profile {
+  id: ID!
+  user: User!
+  displayName: String
+  dateOfBirth: DateTime
+  onboardingStatus: String @search(by: [hash])
+  guardianProfileId: String @search(by: [hash])
+}
+
+type MpesaGoProfile {
+  id: ID!
+  profile: Profile!
+  guardianProfileId: String @search(by: [hash])
+  complianceStatus: MpesaGoComplianceStatus!
+  documentsSubmitted: Boolean!
+  documentsOverdue: Boolean!
+  lipaNaMpesaEnabled: Boolean!
+  sendMoneyEnabled: Boolean!
+  dailyLimit: Int
+  perTransactionLimit: Int
+  isActive: Boolean!
+  registeredAt: DateTime
+}
+
+type Actor {
+  id: ID!
+  type: ActorType! @search(by: [hash])
+  status: ActorStatus! @search(by: [hash])
+  user: User!
+  jurisdictions: [Jurisdiction!]!
+  orgMemberships: [OrgMembership!]!
+  permissions: [EffectivePermission!]!
+  delegatedPermissions: [EffectivePermission!]!
+  delegatedTo: [DelegatedAuthority!]!
+  policyGroupIds: [String!]!
+  createdAt: DateTime
+  updatedAt: DateTime
+}
+
+type ActiveContext {
+  id: ID!
+  actorId: String!
+  actorType: ActorType!
+  permissions: [String!]!
+  delegatedPermissions: [String!]!
+  policyGroups: [String!]!
+  assignments: [Assignment!]!
+  hasPaidPlan: Boolean!
+  userState: UserState! @hasInverse(field: activeContexts)
+}
+
+type UserState {
+  id: ID!
+  userId: String! @id @search(by: [hash])
+  hasPaidPlan: Boolean!
+  profile: Profile
+  mpesaGo: MpesaGoProfile
+  actors: [Actor!]!
+  activeContexts: [ActiveContext!]!
+  assignments: UserAssignments!
+}
+
+# ── 04: Queries ───────────────────────────────────────────────────────────────
+
+type Query {
+  getActiveContext(
+    userId: String!
+    contextType: ActorType!
+    orgId: String
+  ): ActiveContext @lambda
+
+  getUserState(userId: String!): UserState @lambda
+
+  getAssignments(actorId: String!): [Assignment!]! @lambda
+}

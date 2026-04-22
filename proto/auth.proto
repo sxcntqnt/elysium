@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package auth;
+
+option go_package = "sxcntqnt/auth-service/internal/handler/grpc/pb";
+
+// AuthService exposes the same operations as the HTTP API over gRPC.
+// Clients that prefer gRPC (internal services, mobile SDK) use this transport.
+service AuthService {
+  rpc Register    (RegisterRequest)    returns (RegisterResponse);
+  rpc Login       (LoginRequest)       returns (LoginResponse);
+  rpc GetUser     (GetUserRequest)     returns (UserResponse);
+  rpc UpdateUser  (UpdateUserRequest)  returns (UserResponse);
+  rpc DeleteUser  (DeleteUserRequest)  returns (DeleteUserResponse);
+  rpc ListUsers   (ListUsersRequest)   returns (ListUsersResponse);
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ── Auth messages ────────────────────────────────────────────────────────────
+
+message RegisterRequest {
+  string first_name = 1;
+  string last_name  = 2;
+  string nickname   = 3;
+  string password   = 4;
+  string email      = 5;
+  string country    = 6;
+}
+
+message RegisterResponse {
+  User user = 1;
+}
+
+message LoginRequest {
+  string email    = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string access_token  = 1;
+  string refresh_token = 2;
+  int64  expires_in    = 3;
+}
+
+// ── User messages ────────────────────────────────────────────────────────────
+
+message GetUserRequest {
+  string id = 1;
+}
+
+message UpdateUserRequest {
+  string id         = 1;
+  // Optional fields — empty string means "not provided, don't update".
+  string first_name = 2;
+  string last_name  = 3;
+  string nickname   = 4;
+  string country    = 5;
+}
+
+message DeleteUserRequest {
+  string id = 1;
+}
+
+message DeleteUserResponse {
+  string message = 1;
+}
+
+message ListUsersRequest {
+  string country   = 1;
+  int32  page      = 2;
+  int32  page_size = 3;
+}
+
+message ListUsersResponse {
+  repeated User users = 1;
+  int32         total = 2;
+  int32         page  = 3;
+  int32         pages = 4;
+}
+
+message UserResponse {
+  User user = 1;
+}
+
+message User {
+  string id         = 1;
+  string first_name = 2;
+  string last_name  = 3;
+  string nickname   = 4;
+  string email      = 5;
+  string country    = 6;
+  bool   active     = 7;
+  string created_at = 8;
+  string updated_at = 9;
+}
+
+// ── Health messages ──────────────────────────────────────────────────────────
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  string time   = 2;
+}
