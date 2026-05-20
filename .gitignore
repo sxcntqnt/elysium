@@ -2,8 +2,18 @@ bin/
 *.env
 .env
 coverage.out
-scripts/p/*
-scripts/schema/*
-scripts/t/*
-scripts/w/*
-scripts/zw/*
+
+# Database / runtime artifacts
+scripts/p/
+scripts/w/
+scripts/zw/
+scripts/t/
+
+# Optional catch-all safety net
+*.wal
+*.vlog
+*.mem
+
+# Keep actual useful scripts tracked
+!scripts/schema/
+!scripts/vault_bootstrap.sh
