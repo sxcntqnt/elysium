@@ -2,3 +2,8 @@ bin/
 *.env
 .env
 coverage.out
+scripts/p/
+scripts/schema
+scripts/t
+scripts/w
+scripts/zw
