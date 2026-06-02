@@ -8,7 +8,7 @@ scripts/p/
 scripts/w/
 scripts/zw/
 scripts/t/
-
+scripts/*.env
 # Optional catch-all safety net
 *.wal
 *.vlog
