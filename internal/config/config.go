@@ -142,8 +142,8 @@ func Load(ctx context.Context, sm *vault.SecretManager) (*Config, error) {
 
 	return &Config{
 		Server: ServerConfig{
-			HTTPAddr:        envStr("AUTH_HTTP_ADDR", ":8080"),
-			GRPCAddr:        envStr("AUTH_GRPC_ADDR", ":9090"),
+			HTTPAddr:        envStr("AUTH_HTTP_ADDR", ":8980"),
+			GRPCAddr:        envStr("AUTH_GRPC_ADDR", ":9990"),
 			ShutdownTimeout: shutdownTimeout,
 			LogLevel:        envStr("AUTH_LOG_LEVEL", "info"),
 			Env:             envStr("AUTH_ENV", "production"),

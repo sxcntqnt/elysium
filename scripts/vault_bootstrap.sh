@@ -105,7 +105,7 @@ echo "→ Enabling Transit secrets engine..."
 vault_enable_secrets_engine transit transit
 
 echo "→ Ensuring Transit HMAC-SHA256 key '${TRANSIT_KEY}'..."
-vault_ensure_transit_key transit "${TRANSIT_KEY}" hmac-sha256
+vault_ensure_transit_key transit "${TRANSIT_KEY}" aes256-gcm96
 
 echo "→ Enabling AppRole auth..."
 vault_enable_auth_method approle
