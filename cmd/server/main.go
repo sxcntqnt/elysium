@@ -7,16 +7,29 @@
 //  3. Pull all secrets and config from Vault KV v2.
 //  4. Wire the Signer: TransitSigner when AUTH_USE_TRANSIT=true (production),
 //     HMACSigner otherwise (dev / environments without the Transit engine).
-//  5. Build repository, token manager, service, middleware, HTTP/gRPC handlers.
+//  5. Build repository, session service, auth services, middleware, HTTP/gRPC handlers.
 //  6. Start servers; block on OS signal.
 //  7. Graceful shutdown in reverse dependency order.
 //     Vault client is shut down last — all Vault API calls (Transit
 //     sign/verify, future KV re-reads) must complete before renewal stops.
 //
+// Session migration note: AuthService and ServiceAuthService no longer mint
+// tokens themselves (see internal/service/auth.go, service_auth.go) — they
+// validate credentials and return resolved domain entities. SessionService
+// is the single place that mints and verifies the opaque access/refresh
+// tokens clients actually receive. token.Manager (JWT-based) is still wired
+// here because the vault.Signer plumbing (Transit/HMAC) it depends on is
+// otherwise unused elsewhere in this file's wiring, but nothing in the
+// request path currently calls tokenMgr.Issue/IssueContextToken/
+// IssueServiceToken/Verify anymore. If nothing else in this service ends up
+// needing raw JWT issuance, tokenMgr and the signer construction in step 4
+// can be removed entirely in a follow-up cleanup.
+//
 // Keygraph migration (when ready):
 //   Replace: repo, conn, err := dgraph.New(cfg.Database.DgraphTarget)
 //   With:    repo, conn, err := keygraph.New(cfg.Database.KeygraphTarget)
-//   Nothing else changes — the service layer depends on repository.UserRepository.
+//   Nothing else changes — the service layer depends on repository.UserRepository
+//   and repository.SessionRepository.
 package main
 
 import (
@@ -31,6 +44,8 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 	"sxcntqnt/auth-service/internal/config"
 	grpchandler "sxcntqnt/auth-service/internal/handler/grpc"
 	"sxcntqnt/auth-service/internal/handler/grpc/pb"
@@ -40,8 +55,6 @@ import (
 	"sxcntqnt/auth-service/internal/service"
 	"sxcntqnt/auth-service/internal/token"
 	"sxcntqnt/auth-service/internal/vault"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/reflection"
 )
 
 func main() {
@@ -68,7 +81,6 @@ func run(logger *slog.Logger) error {
 	// ── 2. Authenticate to Vault; start background token renewal ─────────────
 	startCtx, startCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer startCancel()
-
 	vaultClient, err := vault.New(startCtx, vault.Config{
 		Address:   vaultCfg.Address,
 		RoleID:    vaultCfg.RoleID,
@@ -105,6 +117,9 @@ func run(logger *slog.Logger) error {
 	// vault.Signer is the only interface the token manager has on the vault
 	// package. Swapping Transit for HMAC (or a future Keygraph signer) is a
 	// single-line change here — no other layer is aware of the difference.
+	//
+	// Retained even though nothing in the current request path calls
+	// tokenMgr.Issue*/Verify anymore — see the package doc comment above.
 	var signer vault.Signer
 
 	if cfg.Auth.UseTransit {
@@ -137,6 +152,9 @@ func run(logger *slog.Logger) error {
 	// ── 5. Build the service graph ────────────────────────────────────────────
 
 	// Repository — swap dgraph.New for keygraph.New here when migrating stores.
+	// *dgraph.Repository satisfies repository.UserRepository AND
+	// repository.SessionRepository (see repository/dgraph/assert.go) — one
+	// connection, one type, two interfaces, same pattern as before.
 	repo, dgraphConn, err := dgraph.New(cfg.Database.DgraphTarget)
 	if err != nil {
 		vaultClient.Shutdown()
@@ -156,26 +174,56 @@ func run(logger *slog.Logger) error {
 			vaultClient.Shutdown()
 			return fmt.Errorf("apply dgraph service account schema: %w", err)
 		}
+		if err := repo.ApplySessionSchema(schemaCtx); err != nil {
+			schemaCancel()
+			vaultClient.Shutdown()
+			return fmt.Errorf("apply dgraph session schema: %w", err)
+		}
 		schemaCancel()
 		logger.Info("dgraph schemas applied")
 	}
 
 	// Token manager receives the Signer — no key material stored here.
+	// No longer consumed by AuthService/ServiceAuthService (see package doc
+	// comment); kept constructed in case something else in this deployment
+	// still needs raw JWT issuance via tokenMgr directly.
 	tokenMgr := token.New(signer, cfg.Auth.Issuer, cfg.Auth.AccessTokenTTL)
+	_ = tokenMgr // silence unused-variable if nothing below references it yet
 
-	// Human user service.
-	svc := service.New(repo, tokenMgr, cfg.Auth.BcryptCost, logger)
+	// Human user service — credential checks and user CRUD only; no token
+	// minting (see internal/service/auth.go doc comment).
+	svc := service.New(repo, cfg.Auth.BcryptCost, logger)
 
 	// Service account repo wraps the same Dgraph connection without method collisions.
 	saRepo := dgraph.NewServiceAccountRepo(repo)
 
-	// Service account auth — shares token manager and bcrypt cost with the user service.
-	svcAuth := service.NewServiceAuth(saRepo, tokenMgr, cfg.Auth.BcryptCost, logger)
+	// Session repo wraps the same Dgraph connection — same pattern as saRepo above.
+	// *SessionRepo satisfies repository.SessionRepository (see repository/dgraph/assert.go).
+	sessionRepo := dgraph.NewSessionRepo(repo)
+
+	// Service account auth — same bcrypt cost as the user service, no token
+	// minting (see internal/service/service_auth.go doc comment).
+	svcAuth := service.NewServiceAuth(saRepo, cfg.Auth.BcryptCost, logger)
+
+	// SessionService is the single place that mints and verifies the opaque
+	// access/refresh tokens both transports hand to clients.
+	sessions := service.NewSessionService(sessionRepo, service.SessionConfig{
+		AccessTTL:  cfg.Auth.AccessTokenTTL,
+		RefreshTTL: cfg.Auth.RefreshTokenTTL,
+	}, logger)
 
 	// ── 6. HTTP server ────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
-	httpH := httphandler.New(svc, svcAuth, repo, logger)
-	httpH.RegisterRoutes(mux, middleware.Authenticate(svc))
+	httpH := httphandler.New(svc, svcAuth, sessions, repo, logger)
+
+	// middleware.Authenticate now wraps SessionService, not AuthService —
+	// AuthService no longer has a VerifyToken method at all (token
+	// verification moved entirely to SessionService.VerifyToken, which
+	// satisfies middleware.TokenVerifier directly; see service/session.go
+	// and middleware/middleware.go for the sentinel-translation boundary
+	// that keeps this swap transparent to middleware.Authenticate's
+	// existing error-handling code).
+	httpH.RegisterRoutes(mux, middleware.Authenticate(sessions))
 
 	globalChain := middleware.Chain(
 		middleware.SecurityHeaders(),
@@ -194,7 +242,11 @@ func run(logger *slog.Logger) error {
 	}
 
 	// ── 7. gRPC server ────────────────────────────────────────────────────────
-	grpcH := grpchandler.New(svc, logger)
+	// grpchandler.New now also takes sessions — see handler/grpc/server.go's
+	// Login RPC (mints opaque tokens via sessions.Create after svc.Login
+	// validates credentials) and principalFromCtx (validates incoming bearer
+	// tokens via sessions.VerifyToken instead of the removed svc.VerifyToken).
+	grpcH := grpchandler.New(svc, sessions, logger)
 
 	grpcSrv := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(

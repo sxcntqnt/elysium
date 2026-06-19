@@ -4,14 +4,15 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
-	"sxcntqnt/auth-service/internal/domain"
 	"golang.org/x/time/rate"
+	"sxcntqnt/auth-service/internal/domain"
 )
 
 type contextKey int
@@ -20,6 +21,13 @@ const principalKey contextKey = iota
 
 // TokenVerifier is the subset of the auth service the middleware needs.
 // ctx is required because Transit implementations call Vault on every verify.
+//
+// This interface is satisfied by *service.SessionService.VerifyToken as of
+// the opaque-token migration (see service/session.go), not by
+// *service.AuthService anymore — AuthService no longer has a VerifyToken
+// method at all. No change is needed in this file beyond what's below:
+// the composition root now constructs Authenticate(sessionService) instead
+// of Authenticate(authService).
 type TokenVerifier interface {
 	VerifyToken(ctx context.Context, tokenString string) (*domain.Principal, error)
 }
@@ -39,8 +47,19 @@ func Authenticate(verifier TokenVerifier) func(http.Handler) http.Handler {
 			// the client disconnects before the token is verified.
 			claims, err := verifier.VerifyToken(r.Context(), strings.TrimPrefix(auth, "Bearer "))
 			if err != nil {
-				switch err {
-				case domain.ErrTokenExpired:
+				// errors.Is, not switch err { case ... }: a plain equality
+				// switch only matches if VerifyToken returns the sentinel
+				// completely unwrapped. SessionService.VerifyToken's
+				// underlying lookupAndCheck wraps lookup failures with
+				// fmt.Errorf("...: %w", err) in some paths, and any future
+				// caller (or a different TokenVerifier implementation) may
+				// wrap further. errors.Is unwraps the chain correctly either
+				// way; == silently degrades every wrapped sentinel to the
+				// generic "invalid token" branch below, which would hide
+				// genuine expiries and revocations behind the wrong message
+				// and status semantics stay correct only by accident.
+				switch {
+				case errors.Is(err, domain.ErrTokenExpired):
 					writeError(w, http.StatusUnauthorized, "token expired")
 				default:
 					writeError(w, http.StatusUnauthorized, "invalid token")

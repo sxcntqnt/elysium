@@ -10,4 +10,5 @@ import "sxcntqnt/auth-service/internal/repository"
 var (
 	_ repository.UserRepository           = (*Repository)(nil)
 	_ repository.ServiceAccountRepository = (*ServiceAccountRepo)(nil)
+	_ repository.SessionRepository        = (*SessionRepo)(nil)
 )

@@ -11,12 +11,21 @@ import (
 )
 
 // serviceAccountSchema declares the Dgraph predicates for ServiceAccount nodes.
+//
+// sa.actor_type added: domain.ServiceAccount has carried an ActorType field
+// since service accounts were introduced, but this predicate, the wire type
+// below, and toDomain() never included it — so GetByClientID silently
+// returned a zero-value ActorType regardless of what CreateServiceAccount
+// persisted. Indexed @index(exact) to match the convention used for
+// sa.client_id and sa.id, since ActorType is a low-cardinality exact-match
+// field (one of the 24 domain.ActorType values), not a free-text field.
 const serviceAccountSchema = `
 type ServiceAccount {
     sa.id
     sa.client_id
     sa.name
     sa.secret_hash
+    sa.actor_type
     sa.permissions
     sa.active
     sa.created_at
@@ -27,6 +36,7 @@ sa.id:          string   @index(exact)          @upsert .
 sa.client_id:   string   @index(exact)          @upsert .
 sa.name:        string   @index(term)                   .
 sa.secret_hash: string                                  .
+sa.actor_type:  string   @index(exact)                  .
 sa.permissions: [string]                               .
 sa.active:      bool     @index(bool)                  .
 sa.created_at:  datetime @index(hour)                  .
@@ -35,6 +45,13 @@ sa.updated_at:  datetime                               .
 
 // ApplyServiceAccountSchema extends the Dgraph schema to include
 // ServiceAccount predicates. Call once at startup after ApplySchema.
+//
+// This is additive-only via Alter (no drop), so existing ServiceAccount
+// nodes created before this fix simply have an absent sa.actor_type
+// predicate — toDomain() will produce ActorType: "" for those until they
+// are re-saved (e.g. via a future UpdateServiceAccount, if one is added)
+// or backfilled directly in Dgraph. New accounts created after this fix
+// are correct from creation.
 func (r *Repository) ApplyServiceAccountSchema(ctx context.Context) error {
 	if err := r.client.Alter(ctx, &api.Operation{Schema: serviceAccountSchema}); err != nil {
 		return fmt.Errorf("dgraph: apply service account schema: %w", err)
@@ -64,6 +81,7 @@ type dgraphServiceAccount struct {
 	ClientID    string   `json:"sa.client_id,omitempty"`
 	Name        string   `json:"sa.name,omitempty"`
 	SecretHash  string   `json:"sa.secret_hash,omitempty"`
+	ActorType   string   `json:"sa.actor_type,omitempty"`
 	Permissions []string `json:"sa.permissions,omitempty"`
 	Active      bool     `json:"sa.active"`
 	CreatedAt   string   `json:"sa.created_at,omitempty"`
@@ -82,6 +100,7 @@ func (d *dgraphServiceAccount) toDomain() *domain.ServiceAccount {
 		ClientID:    d.ClientID,
 		Name:        d.Name,
 		SecretHash:  d.SecretHash,
+		ActorType:   domain.ActorType(d.ActorType),
 		Permissions: perms,
 		Active:      d.Active,
 		CreatedAt:   created,
@@ -100,6 +119,7 @@ func (s *ServiceAccountRepo) CreateServiceAccount(ctx context.Context, sa *domai
 		ClientID:    sa.ClientID,
 		Name:        sa.Name,
 		SecretHash:  sa.SecretHash,
+		ActorType:   string(sa.ActorType),
 		Permissions: sa.Permissions,
 		Active:      sa.Active,
 		CreatedAt:   sa.CreatedAt.UTC().Format(time.RFC3339),
@@ -145,6 +165,7 @@ func (s *ServiceAccountRepo) GetByClientID(ctx context.Context, clientID string,
 				sa.client_id
 				sa.name
 				sa.secret_hash
+				sa.actor_type
 				sa.permissions
 				sa.active
 				sa.created_at

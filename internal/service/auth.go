@@ -9,10 +9,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 	"sxcntqnt/auth-service/internal/domain"
 	"sxcntqnt/auth-service/internal/repository"
-	"sxcntqnt/auth-service/internal/token"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // bcryptFloor is the minimum acceptable cost factor.
@@ -20,17 +19,20 @@ import (
 // a misconfigured Vault secret from weakening password hashing.
 const bcryptFloor = 12
 
-// TokenManager is the subset of token.Manager the service needs.
-type TokenManager interface {
-	Issue(ctx context.Context, userID, nickname, email string) (*domain.TokenPair, error)
-	IssueContextToken(ctx context.Context, input domain.ContextActivationInput) (*domain.TokenPair, error)
-	Verify(ctx context.Context, tokenString string) (*domain.Principal, error)
-}
-
-// AuthService handles registration, authentication, and profile management.
+// AuthService handles registration, credential verification, and profile
+// management.
+//
+// Token minting moved to SessionService as part of the migration to opaque
+// session tokens (see service/session.go). AuthService now returns resolved
+// domain entities (*domain.User, context activation data) rather than
+// *domain.TokenPair — the handler layer is responsible for taking that
+// output and calling SessionService.Create / SessionService.ActivateContext
+// to mint the actual client-facing tokens. This keeps credential validation
+// and session lifecycle as two separately testable concerns, matching the
+// existing project value of clean layering with interfaces defined at
+// consumption sites.
 type AuthService struct {
 	repo       repository.UserRepository
-	tokens     TokenManager
 	bcryptCost int
 	logger     *slog.Logger
 }
@@ -38,11 +40,11 @@ type AuthService struct {
 // New constructs an AuthService.
 // Panics if bcryptCost is below bcryptFloor — a low cost is a security
 // regression, not a configuration warning.
-func New(repo repository.UserRepository, tokens TokenManager, bcryptCost int, logger *slog.Logger) *AuthService {
+func New(repo repository.UserRepository, bcryptCost int, logger *slog.Logger) *AuthService {
 	if bcryptCost < bcryptFloor {
 		panic(fmt.Sprintf("service: bcryptCost %d is below the minimum of %d", bcryptCost, bcryptFloor))
 	}
-	return &AuthService{repo: repo, tokens: tokens, bcryptCost: bcryptCost, logger: logger}
+	return &AuthService{repo: repo, bcryptCost: bcryptCost, logger: logger}
 }
 
 // Register creates a new user account. Returns the created User and the
@@ -84,7 +86,9 @@ func (s *AuthService) Register(ctx context.Context, input domain.CreateUserInput
 	return user, zookie, nil
 }
 
-// Login authenticates a user and returns a token pair.
+// Login authenticates a user and returns the resolved User on success.
+// It no longer mints tokens — the handler passes the returned User into
+// SessionService.Create to open an opaque-token session.
 //
 // Timing-safe: bcrypt.CompareHashAndPassword always runs even on the
 // user-not-found path — without it, a fast early return leaks whether
@@ -93,7 +97,7 @@ func (s *AuthService) Register(ctx context.Context, input domain.CreateUserInput
 // Consistency: Login always performs a strong read (domain.StrongRead)
 // because a recently changed password must be visible immediately —
 // a stale read here is a security defect, not just an UX issue.
-func (s *AuthService) Login(ctx context.Context, input domain.LoginInput) (*domain.TokenPair, error) {
+func (s *AuthService) Login(ctx context.Context, input domain.LoginInput) (*domain.User, error) {
 	if err := input.Validate(); err != nil {
 		return nil, fmt.Errorf("login: %w", err)
 	}
@@ -113,13 +117,8 @@ func (s *AuthService) Login(ctx context.Context, input domain.LoginInput) (*doma
 		return nil, domain.ErrUnauthorized
 	}
 
-	pair, err := s.tokens.Issue(ctx, user.ID, user.Nickname, user.Email)
-	if err != nil {
-		return nil, fmt.Errorf("login: issue tokens: %w", err)
-	}
-
-	s.logger.InfoContext(ctx, "user logged in", slog.String("user_id", user.ID))
-	return pair, nil
+	s.logger.InfoContext(ctx, "user authenticated", slog.String("user_id", user.ID))
+	return user, nil
 }
 
 // GetUser returns an active user by ID.
@@ -178,18 +177,17 @@ func (s *AuthService) ListUsers(ctx context.Context, filter domain.ListFilter, z
 	return result, nil
 }
 
-// ActivateContext exchanges a basic token's identity for a context-scoped token
-// that embeds actor_id, actor_type, and flattened permission arrays.
+// ActivateContext validates a requested actor-context switch and returns the
+// resolved domain.ContextActivationInput. It no longer mints a token — the
+// handler passes the returned value into SessionService.ActivateContext to
+// revoke the caller's current session and open a new one under the
+// activated context.
 //
-// The caller must have already called Dgraph's getActiveContext query to
-// obtain the context data and passes it here in ContextActivationInput.
-// The auth service does not query Dgraph — it signs whatever context Dgraph's
-// authoritative resolver has produced.
-//
-// The returned TokenPair replaces the caller's basic token. The new access
-// token carries enough information for downstream services to make fast
-// in-process authorisation decisions using Principal.HasPermission().
-func (s *AuthService) ActivateContext(ctx context.Context, callerID string, input domain.ContextActivationInput) (*domain.TokenPair, error) {
+// The caller must have already resolved input from Dgraph's getActiveContext
+// query (actor_id, actor_type, permissions, etc.) before calling this method.
+// AuthService does not query Dgraph for context data — it only enforces the
+// ownership and validity invariants below.
+func (s *AuthService) ActivateContext(ctx context.Context, callerID string, input domain.ContextActivationInput) (*domain.ContextActivationInput, error) {
 	// Ensure the input is for the authenticated caller — prevent privilege
 	// escalation by a user who substitutes another user's actor_id.
 	if input.UserID != callerID {
@@ -202,23 +200,10 @@ func (s *AuthService) ActivateContext(ctx context.Context, callerID string, inpu
 		return nil, fmt.Errorf("activate context: actor_id must not be empty: %w", domain.ErrInvalidInput)
 	}
 
-	pair, err := s.tokens.IssueContextToken(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("activate context: %w", err)
-	}
-
-	s.logger.InfoContext(ctx, "context token issued",
+	s.logger.InfoContext(ctx, "context activation validated",
 		slog.String("user_id", callerID),
 		slog.String("actor_id", input.ActorID),
 		slog.String("actor_type", string(input.ActorType)),
 	)
-	return pair, nil
+	return &input, nil
 }
-
-// VerifyToken validates an access token and returns the caller's Principal.
-func (s *AuthService) VerifyToken(ctx context.Context, tokenString string) (*domain.Principal, error) {
-	return s.tokens.Verify(ctx, tokenString)
-}
-
-// compile-time assertion: *token.Manager satisfies TokenManager.
-var _ TokenManager = (*token.Manager)(nil)

@@ -7,26 +7,28 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 	"sxcntqnt/auth-service/internal/domain"
 	"sxcntqnt/auth-service/internal/repository"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // serviceSecretMinLen is the minimum length for service client secrets.
 // 32 characters gives ~160 bits of entropy when randomly generated.
 const serviceSecretMinLen = 32
 
-// ServiceTokenIssuer is the subset of the token manager ServiceAuthService needs.
-type ServiceTokenIssuer interface {
-	IssueServiceToken(ctx context.Context, clientID, name string, actorType domain.ActorType) (*domain.TokenPair, error)
-}
-
-// ServiceAuthService handles service account lifecycle and authentication.
-// It sits alongside AuthService — both are wired in the composition root and
-// share the same token manager and signing infrastructure.
+// ServiceAuthService handles service account lifecycle and credential
+// verification. It sits alongside AuthService — both are wired in the
+// composition root and both have had token minting removed in favour of
+// SessionService (see service/session.go).
+//
+// Login no longer returns a *domain.TokenPair. It returns the resolved
+// *domain.ServiceAccount on success; the handler passes ClientID into
+// SessionService.Create to open an opaque-token session, exactly mirroring
+// how AuthService.Login now hands its resolved *domain.User to the same
+// SessionService.Create call. This keeps a single token-minting code path
+// for both principal kinds rather than two parallel JWT issuers.
 type ServiceAuthService struct {
 	repo       repository.ServiceAccountRepository
-	tokens     ServiceTokenIssuer
 	bcryptCost int
 	logger     *slog.Logger
 }
@@ -35,7 +37,6 @@ type ServiceAuthService struct {
 // bcryptCost is sourced from Vault KV v2 (same value as AuthService).
 func NewServiceAuth(
 	repo repository.ServiceAccountRepository,
-	tokens ServiceTokenIssuer,
 	bcryptCost int,
 	logger *slog.Logger,
 ) *ServiceAuthService {
@@ -44,7 +45,6 @@ func NewServiceAuth(
 	}
 	return &ServiceAuthService{
 		repo:       repo,
-		tokens:     tokens,
 		bcryptCost: bcryptCost,
 		logger:     logger,
 	}
@@ -88,14 +88,17 @@ func (s *ServiceAuthService) CreateServiceAccount(ctx context.Context, input dom
 	return sa, zookie, nil
 }
 
-// Login authenticates a service account and returns a token pair.
+// Login authenticates a service account and returns the resolved
+// ServiceAccount on success. It no longer mints tokens — the handler
+// passes the returned account's ClientID into SessionService.Create to
+// open an opaque-token session.
 //
 // Timing-safe: bcrypt.CompareHashAndPassword always runs even on the
 // client_id-not-found path — identical to the human Login defence.
 //
 // Consistency: always performs a strong read (domain.StrongRead) so a
 // recently rotated secret is immediately effective.
-func (s *ServiceAuthService) Login(ctx context.Context, input domain.ServiceLoginInput) (*domain.TokenPair, error) {
+func (s *ServiceAuthService) Login(ctx context.Context, input domain.ServiceLoginInput) (*domain.ServiceAccount, error) {
 	if err := input.Validate(); err != nil {
 		return nil, fmt.Errorf("service login: %w", err)
 	}
@@ -115,15 +118,10 @@ func (s *ServiceAuthService) Login(ctx context.Context, input domain.ServiceLogi
 		return nil, domain.ErrUnauthorized
 	}
 
-	pair, err := s.tokens.IssueServiceToken(ctx, sa.ClientID, sa.Name, sa.ActorType)
-	if err != nil {
-		return nil, fmt.Errorf("service login: issue token: %w", err)
-	}
-
-	s.logger.InfoContext(ctx, "service account logged in",
+	s.logger.InfoContext(ctx, "service account authenticated",
 		slog.String("client_id", sa.ClientID),
 	)
-	return pair, nil
+	return sa, nil
 }
 
 // DeactivateServiceAccount marks the service account as inactive.
