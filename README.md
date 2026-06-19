@@ -34,9 +34,13 @@ Two services own two different concerns and neither leaks into the other:
 
 This split means a credential check and a token-minting decision are independently testable, and a future identity store swap (Keygraph) only touches the repository layer, not session semantics.
 
+`domain.Session.Kind` reuses the existing `domain.PrincipalKind` type (`PrincipalKindUser` / `PrincipalKindService`) that already backed JWT-based `Principal` — there is no separate `TokenKind` type. An earlier draft of this migration introduced a parallel `TokenKind` type plus a second `Principal` struct directly in `domain/session.go`; both were duplicate declarations against the existing `domain/user.go` types and were caught only once `go run` actually compiled the package (`Principal redeclared in this block`). They were removed before this version; see "Known gaps and deliberate deferrals" for the broader lesson this surfaced.
+
+On the repository side, `repository.SessionRepository` is implemented by `dgraph.SessionRepo` (`internal/repository/dgraph/session.go`) — a thin wrapper holding a `*Repository` reference, not a set of new methods bolted directly onto `*Repository` itself. This mirrors `dgraph.ServiceAccountRepo` exactly, and for the same reason: `*Repository` already declares `Create`, `GetByID`, and `queryOne` for the `User` type, so a session-specific `Create`/`GetByID` on the same receiver type would be a duplicate method declaration, not an overload — Go has no method overloading. `dgraph.NewSessionRepo(repo)` shares the same underlying Dgraph connection as the `*Repository` it wraps; nothing about the connection pool changes, only the method set each wrapper exposes.
+
 ## Why opaque tokens instead of JWTs
 
-A self-contained JWT is unrevocable by construction — once issued, it is valid until it expires, no matter what happens server-side. That is a structural risk for SaaS-style integrations and stolen-token scenarios (see "Refresh token attack surface" below). Moving to opaque, server-resolved tokens trades a small amount of latency (one Dgraph lookup per request) for:
+A self-contained JWT is unrevocable by construction — once issued, it is valid until it expires, no matter what happens server-side. That is a structural risk for stolen-token and compromised-integration scenarios; this is the exact failure mode that motivated the opaque-token design (see "Replay detection" below for the specific defense against reused refresh tokens). Moving to opaque, server-resolved tokens trades a small amount of latency (one Dgraph lookup per request) for:
 
 - **Real revocation** — logout, logout-all-devices, and admin-initiated revocation take effect immediately, not at natural token expiry.
 - **Replay detection** — reusing a rotated-away refresh token is detectable and triggers automatic revocation of the entire session family (see `SessionService.Refresh`).
@@ -82,7 +86,7 @@ POST /auth/refresh  ─────────────► Old refresh token
 POST /auth/logout | /auth/logout-all  ──► Session(s) revoked immediately
 ```
 
-Service accounts follow the same `Session` model under `domain.TokenKindService` — there is one session store and one verification path for both principal kinds, not two parallel systems.
+Service accounts follow the same `Session` model under `domain.PrincipalKindService` — there is one session store and one verification path for both principal kinds, not two parallel systems.
 
 ### Replay detection
 
@@ -111,7 +115,9 @@ The `GET /auth/verify` endpoint is the integration point for an NGINX (or Traefi
 
 ## Known gaps and deliberate deferrals
 
-These are tracked rather than silently fixed, since some require a decision this README doesn't make on your behalf:
+These are tracked rather than silently fixed, since some require a decision this README doesn't make on your behalf. A few entries below are resolved-but-worth-remembering: real `go run` compile failures hit during this migration, kept here so the same mistake isn't reintroduced by a future edit.
+
+**Open:**
 
 - **`ContextResolver.ResolveActiveContext`** has no concrete implementation yet. It's the seam where the handler is meant to consume Dgraph's `getActiveContext` lambda query (defined in `scripts/schema/04-queries.graphql`) before calling `AuthService.ActivateContext`. Currently interface-only.
 - **`domain.Session` does not carry `Nickname`/`Email`/service `Name`.** `GET /auth/me` therefore returns empty strings for those fields on the user path. The old JWT-based `Principal` had them because the JWT claims embedded them at issue time; the session record does not yet. Fix requires extending `Session`/`SessionCreateInput` and threading the values through `SessionService.Create`.
@@ -119,6 +125,12 @@ These are tracked rather than silently fixed, since some require a decision this
 - **gRPC does not expose `ActivateContext` or service-account login as RPCs.** Only `Register`, `Login`, `GetUser`, `UpdateUser`, `DeleteUser`, `ListUsers`, and `HealthCheck` exist in the current `.proto`/generated `pb` package. Adding the others requires a proto schema change, not just a Go-side wire-up.
 - **Pre-existing `ServiceAccount` nodes in Dgraph predate the `sa.actor_type` predicate fix** (`repository/dgraph/service_account.go`) and will read back with an empty `ActorType` until re-created or backfilled directly in Dgraph.
 - **gRPC's `principalFromCtx` and HTTP's `Authenticate` middleware both collapse session errors into two buckets** (`domain.ErrTokenExpired` / `domain.ErrTokenInvalid`) rather than surfacing "revoked" as a distinct case. `SessionService.VerifyToken` translates its internal `ErrSessionExpired` / `ErrSessionRevoked` / `ErrSessionNotFound` sentinels down to that two-value `domain` vocabulary at its own boundary, specifically so `middleware` package stays decoupled from `service`. Callers that need the finer-grained distinction (logout, session management) should call `SessionService.ValidateSession` instead, which does not perform this translation.
+
+**Resolved during this migration, kept as history:**
+
+- **`Principal redeclared in this block`** — an earlier draft of `domain/session.go` declared its own `TokenKind` type and a second `Principal` struct, duplicating `domain/user.go`'s existing `PrincipalKind` and `Principal`. `go build`/`go run` rejected the package outright. Fixed by deleting both from `session.go` and having `Session.Kind` / `SessionCreateInput.Kind` use `domain.PrincipalKind` directly. If you're extending the session type with new identity-shaped fields, check `user.go` first — `Principal` already carries `UserID`, `ActorID`, `ActorType`, `Nickname`, `Email`, `ClientID`, `Name`, `Permissions`, `DelegatedPermissions`, `PolicyGroups`; there is rarely a reason to add a parallel field set rather than reuse what's there.
+- **`method Repository.Create already declared`** (and the same for `GetByID`, `queryOne`) — the first draft of `repository/dgraph/session.go` declared `Create`/`GetByID`/`queryOne` directly on `*Repository`, colliding with the existing methods of the same name that operate on `*domain.User`. Go has no method overloading, so this is a hard compile error, not a runtime ambiguity. Fixed by introducing `dgraph.SessionRepo`, a wrapper struct holding `r *Repository` — the exact same pattern `dgraph.ServiceAccountRepo` already used for service accounts. Any future Dgraph-backed type that needs its own `Create`/`GetByID`-style methods should follow this wrapper pattern from the start rather than adding methods straight onto `*Repository`.
+- **`assert.go` / `main.go` follow-on errors** — both of the bugs above cascaded into `repository/dgraph/assert.go` (asserting the wrong concrete type against `repository.SessionRepository`) and `cmd/server/main.go` (passing `repo` directly into `service.NewSessionService` instead of a constructed `dgraph.NewSessionRepo(repo)`). Both are fixed now that `SessionRepo` exists as its own type — `assert.go` checks `(*SessionRepo)(nil)`, and `main.go` constructs `sessionRepo := dgraph.NewSessionRepo(repo)` before passing it to `service.NewSessionService`, mirroring how `saRepo := dgraph.NewServiceAccountRepo(repo)` is already built two lines above it.
 
 ## NGINX forward-auth (deferred integration detail)
 
