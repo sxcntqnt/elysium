@@ -5,7 +5,7 @@ build:
 	go build -o bin/auth-service ./cmd/server
 
 run: build
-	JWT_SECRET="change-me-to-a-32-char-secret!!" \
+	JWT_SECRET=$$(openssl rand -hex 32 \
 	DGRAPH_TARGET="localhost:9080" \
 	ENV=development \
 	./bin/auth-service
