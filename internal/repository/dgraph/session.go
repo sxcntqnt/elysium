@@ -256,7 +256,7 @@ func (s *SessionRepo) GetByID(ctx context.Context, id string) (*domain.Session, 
 			}
 		}`, sessionFields)
 
-	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"$uid": id})
+	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"uid": id})
 	if err != nil {
 		return nil, fmt.Errorf("dgraph: get session by id: %w", err)
 	}
@@ -281,7 +281,7 @@ func (s *SessionRepo) ListForUser(ctx context.Context, userID string) ([]*domain
 			}
 		}`, sessionFields)
 
-	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"$uid": userID})
+	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"uid": userID})
 	if err != nil {
 		return nil, fmt.Errorf("dgraph: list sessions for user: %w", err)
 	}
@@ -324,7 +324,7 @@ func (s *SessionRepo) RotateTokens(ctx context.Context, in domain.SessionRefresh
 				session.ip_address
 			}
 		}`
-	qresp, err := txn.QueryWithVars(ctx, q, map[string]string{"$uid": in.OldSessionID})
+	qresp, err := txn.QueryWithVars(ctx, q, map[string]string{"uid": in.OldSessionID})
 	if err != nil {
 		return nil, fmt.Errorf("dgraph: rotate tokens read: %w", err)
 	}
@@ -443,7 +443,7 @@ func (s *SessionRepo) RevokeAllForUser(ctx context.Context, userID string) error
 				uid
 			}
 		}`
-	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"$uid": userID})
+	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"uid": userID})
 	if err != nil {
 		return fmt.Errorf("dgraph: list sessions for bulk revoke: %w", err)
 	}
@@ -533,7 +533,7 @@ func (s *SessionRepo) queryOne(ctx context.Context, predicate, value string) (*d
 			}
 		}`, predicate, sessionFields)
 
-	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"$val": value})
+	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"val": value})
 	if err != nil {
 		return nil, fmt.Errorf("dgraph: query session by %s: %w", predicate, err)
 	}

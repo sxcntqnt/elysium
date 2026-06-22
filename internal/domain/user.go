@@ -41,12 +41,12 @@ type User struct {
 
 // CreateUserInput carries validated, sanitised input for user creation.
 type CreateUserInput struct {
-	FirstName string
-	LastName  string
-	Nickname  string
-	Password  string // plaintext — hashed before persistence
-	Email     string
-	Country   string
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	Nickname  string `json:"nickname"`
+	Password  string `json:"password"`
+	Email     string `json:"email"`
+	Country   string `json:"country"`
 }
 
 // Validate enforces business rules at the boundary before any persistence.
@@ -78,16 +78,16 @@ func (i *CreateUserInput) Validate() error {
 // UpdateUserInput carries validated fields for a partial user update.
 // Pointer fields allow distinguishing "not provided" from zero value.
 type UpdateUserInput struct {
-	FirstName *string
-	LastName  *string
-	Nickname  *string
-	Country   *string
+	FirstName *string `json:"first_name,omitempty"`
+	LastName  *string `json:"last_name,omitempty"`
+	Nickname  *string `json:"nickname,omitempty"`
+	Country   *string `json:"country,omitempty"`
 }
 
 // LoginInput carries credentials for authentication.
 type LoginInput struct {
-	Email    string
-	Password string
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 // Validate sanitises and checks credentials before any DB call.

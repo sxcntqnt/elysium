@@ -141,10 +141,11 @@ echo "→ Configuring AppRole '${ROLE_NAME}'..."
 # you want so that TTL / policy changes are applied without manual cleanup.
 vault write "auth/approle/role/${ROLE_NAME}" \
   token_policies="${ROLE_NAME}-policy" \
-  token_ttl="1h" \
+  token_period="24h" \
   token_max_ttl="24h" \
   token_type="service" \
-  secret_id_ttl="720h"   # 30 days; use response-wrapping in prod
+  secret_id_ttl="720h" 
+
 echo "  AppRole '${ROLE_NAME}' configured"
 
 echo "→ Writing placeholder KV secrets (skipped if already present)..."

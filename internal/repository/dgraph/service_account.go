@@ -140,7 +140,7 @@ func (s *ServiceAccountRepo) CreateServiceAccount(ctx context.Context, sa *domai
 			Cond:      `@if(eq(len(existing), 0))`,
 			CommitNow: true,
 		}},
-		Vars:      map[string]string{"$clientID": sa.ClientID},
+		Vars:      map[string]string{"clientID": sa.ClientID},
 		CommitNow: true,
 	}
 
@@ -171,7 +171,7 @@ func (s *ServiceAccountRepo) GetByClientID(ctx context.Context, clientID string,
 				sa.created_at
 				sa.updated_at
 			}
-		}`, map[string]string{"$clientID": clientID})
+		}`, map[string]string{"clientID": clientID})
 	if err != nil {
 		return nil, fmt.Errorf("dgraph: get service account: %w", err)
 	}
@@ -196,7 +196,7 @@ func (s *ServiceAccountRepo) Deactivate(ctx context.Context, clientID string) (d
 	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, `
 		query q($clientID: string) {
 			accounts(func: eq(sa.client_id, $clientID)) { uid }
-		}`, map[string]string{"$clientID": clientID})
+		}`, map[string]string{"clientID": clientID})
 	if err != nil {
 		return domain.Zookie{}, fmt.Errorf("dgraph: deactivate lookup: %w", err)
 	}
