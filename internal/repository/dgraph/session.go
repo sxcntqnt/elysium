@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/dgraph-io/dgo/v230/protos/api"
@@ -248,15 +249,45 @@ func (s *SessionRepo) GetByRefreshHash(ctx context.Context, hash string) (*domai
 	return s.queryOne(ctx, "session.refresh_token_hash", hash)
 }
 
-// GetByID retrieves a session by its Dgraph UID.
-func (s *SessionRepo) GetByID(ctx context.Context, id string) (*domain.Session, error) {
-	q := fmt.Sprintf(`
-		query Session($uid: string) {
-			session(func: uid($uid)) @filter(type(Session)) {%s
-			}
-		}`, sessionFields)
+// validDgraphUID matches Dgraph's own hex uid format: "0x" followed by one
+// or more hex digits. GetByID's id parameter is NOT always internally
+// generated — it is also reachable from the HTTP layer via
+// DELETE /auth/sessions/{id} (RevokeSession), where it comes straight off
+// the URL path with no upstream validation. Since GetByID builds its query
+// via literal string interpolation (see the uid-vs-string-variable
+// rationale on GetByID itself), every call site must be guarded against a
+// malformed or malicious id breaking out of the intended query — this is
+// the one and only place that guard needs to live.
+var validDgraphUID = regexp.MustCompile(`^0x[0-9a-fA-F]+$`)
 
-	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"uid": id})
+// GetByID retrieves a session by its Dgraph UID.
+//
+// Uses literal uid interpolation rather than a $-parameterized query
+// variable: Dgraph's func: uid(...) root function expects either a literal
+// uid or a uid-typed query variable bound via "X AS var(...)" earlier in
+// the same query — it does not accept an externally-supplied string
+// parameter the way eq(predicate, $var) does. Declaring $uid: string and
+// writing func: uid($uid) produces "Type of variable uid not specified" at
+// query time (confirmed against Dgraph's own DQL error set). This mirrors
+// how repository.go's Delete already builds fmt.Sprintf(`{"uid": %q}`, ...)
+// rather than parameterizing a uid.
+//
+// Because id can originate from user-supplied HTTP path input (see
+// validDgraphUID doc comment), it is validated against Dgraph's hex uid
+// format before being interpolated — rejecting anything else outright
+// rather than ever passing it through to query construction.
+func (s *SessionRepo) GetByID(ctx context.Context, id string) (*domain.Session, error) {
+	if !validDgraphUID.MatchString(id) {
+		return nil, fmt.Errorf("dgraph: get session by id: invalid uid format %q", id)
+	}
+
+	q := fmt.Sprintf(`
+		{
+			session(func: uid(%s)) @filter(type(Session)) {%s
+			}
+		}`, id, sessionFields)
+
+	resp, err := s.r.client.NewReadOnlyTxn().Query(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("dgraph: get session by id: %w", err)
 	}
@@ -281,7 +312,7 @@ func (s *SessionRepo) ListForUser(ctx context.Context, userID string) ([]*domain
 			}
 		}`, sessionFields)
 
-	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"uid": userID})
+	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"$uid": userID})
 	if err != nil {
 		return nil, fmt.Errorf("dgraph: list sessions for user: %w", err)
 	}
@@ -303,12 +334,19 @@ func (s *SessionRepo) ListForUser(ctx context.Context, userID string) ([]*domain
 // read it inside the transaction, we return ErrRefreshTokenReplayed so the
 // caller can trigger full-family revocation.
 func (s *SessionRepo) RotateTokens(ctx context.Context, in domain.SessionRefreshInput) (*domain.Session, error) {
+	if !validDgraphUID.MatchString(in.OldSessionID) {
+		return nil, fmt.Errorf("dgraph: rotate tokens: invalid uid format %q", in.OldSessionID)
+	}
+
 	txn := s.r.client.NewTxn()
 	defer txn.Discard(ctx) //nolint:errcheck
 
-	q := `
-		query Old($uid: string) {
-			old(func: uid($uid)) @filter(type(Session)) {
+	// Literal interpolation, not a $-parameterized query variable — same
+	// rationale as GetByID above: func: uid(...) does not accept a
+	// string-typed external parameter.
+	q := fmt.Sprintf(`
+		{
+			old(func: uid(%s)) @filter(type(Session)) {
 				uid
 				session.revoked
 				session.kind
@@ -323,8 +361,8 @@ func (s *SessionRepo) RotateTokens(ctx context.Context, in domain.SessionRefresh
 				session.user_agent
 				session.ip_address
 			}
-		}`
-	qresp, err := txn.QueryWithVars(ctx, q, map[string]string{"uid": in.OldSessionID})
+		}`, in.OldSessionID)
+	qresp, err := txn.Query(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("dgraph: rotate tokens read: %w", err)
 	}
@@ -443,7 +481,7 @@ func (s *SessionRepo) RevokeAllForUser(ctx context.Context, userID string) error
 				uid
 			}
 		}`
-	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"uid": userID})
+	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"$uid": userID})
 	if err != nil {
 		return fmt.Errorf("dgraph: list sessions for bulk revoke: %w", err)
 	}
@@ -533,7 +571,7 @@ func (s *SessionRepo) queryOne(ctx context.Context, predicate, value string) (*d
 			}
 		}`, predicate, sessionFields)
 
-	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"val": value})
+	resp, err := s.r.client.NewReadOnlyTxn().QueryWithVars(ctx, q, map[string]string{"$val": value})
 	if err != nil {
 		return nil, fmt.Errorf("dgraph: query session by %s: %w", predicate, err)
 	}

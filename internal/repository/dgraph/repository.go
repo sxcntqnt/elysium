@@ -220,7 +220,7 @@ func (r *Repository) Update(ctx context.Context, id string, input *domain.Update
 				user.created_at
 				user.updated_at
 			}
-		}`, map[string]string{"id": id})
+		}`, map[string]string{"$id": id})
 	if err != nil {
 		return nil, domain.Zookie{}, fmt.Errorf("dgraph: update read: %w", err)
 	}
@@ -273,7 +273,7 @@ func (r *Repository) Delete(ctx context.Context, id string) (domain.Zookie, erro
 	resp, err := r.client.NewReadOnlyTxn().QueryWithVars(ctx, `
 		query q($id: string) {
 			users(func: eq(user.id, $id)) { uid }
-		}`, map[string]string{"id": id})
+		}`, map[string]string{"$id": id})
 	if err != nil {
 		return domain.Zookie{}, fmt.Errorf("dgraph: delete lookup: %w", err)
 	}
@@ -320,7 +320,7 @@ func (r *Repository) GetByID(ctx context.Context, id string, zookie *domain.Zook
 				user.created_at
 				user.updated_at
 			}
-		}`, map[string]string{"id": id}, zookie)
+		}`, map[string]string{"$id": id}, zookie)
 }
 
 // GetByEmail fetches a user by email address.
@@ -341,7 +341,7 @@ func (r *Repository) GetByEmail(ctx context.Context, email string, zookie *domai
 				user.created_at
 				user.updated_at
 			}
-		}`, map[string]string{"email": strings.ToLower(email)}, zookie)
+		}`, map[string]string{"$email": strings.ToLower(email)}, zookie)
 }
 
 // queryOne is the shared single-user lookup implementation.
@@ -370,8 +370,8 @@ func (r *Repository) List(ctx context.Context, filter domain.ListFilter, zookie 
 	offset := (filter.Page - 1) * filter.PageSize
 
 	vars := map[string]string{
-		"offset":   fmt.Sprintf("%d", offset),
-		"pageSize": fmt.Sprintf("%d", filter.PageSize),
+		"$offset":   fmt.Sprintf("%d", offset),
+		"$pageSize": fmt.Sprintf("%d", filter.PageSize),
 	}
 
 	var q string
@@ -387,7 +387,7 @@ func (r *Repository) List(ctx context.Context, filter domain.ListFilter, zookie 
 				count(uid)
 			}
 		}`
-		vars["country"] = filter.Country
+		vars["$country"] = filter.Country
 	} else {
 		q = `
 		query q($offset: int, $pageSize: int) {
